@@ -21,6 +21,8 @@
 
 const SHEET_NAME = "carrot";      // "carrot table" 스프레드시트의 실제 탭 이름에 맞춤
 const SECRET_KEY = "wpdlTl316719";   // index.html의 SECRET_KEY와 동일해야 함
+const SPREADSHEET_ID = "17a7UXxIta9opdeTYQU-2Fi8f6vzDgNEGalqFKEGwhAg"; // "carrot table" 시트 ID (URL의 /d/와 /edit 사이 문자열)
+const RETENTION_DAYS = 7;         // 접수 후 이 일수가 지나면 자동 삭제
 
 function doPost(e) {
   try {
@@ -33,21 +35,22 @@ function doPost(e) {
         .setMimeType(ContentService.MimeType.JSON);
     }
 
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
     let sheet = ss.getSheetByName(SHEET_NAME);
     if (!sheet) {
       sheet = ss.insertSheet(SHEET_NAME);
     }
     // 탭이 이미 있어도 데이터(헤더 포함)가 하나도 없으면 헤더 행을 추가합니다.
     if (sheet.getLastRow() === 0) {
-      sheet.appendRow(["이름", "휴대전화", "거주 지역", "희망 상품"]);
+      sheet.appendRow(["이름", "휴대전화", "거주 지역", "희망 상품", "접수일시"]);
     }
 
     sheet.appendRow([
       data.name || "",
       data.phone || "",
       data.region || "",
-      data.plan || ""
+      data.plan || "",
+      new Date()
     ]);
 
     return ContentService
@@ -66,4 +69,56 @@ function doGet(e) {
   return ContentService
     .createTextOutput("OK - 이 URL은 POST 전용 웹훅입니다.")
     .setMimeType(ContentService.MimeType.TEXT);
+}
+
+/**
+ * [자동 삭제] RETENTION_DAYS(현재 7일)보다 오래된 데이터를 매일 삭제합니다.
+ * 이 함수 자체는 자동으로 실행되지 않으며, 아래 installDailyCleanupTrigger()를
+ * 딱 한 번 수동으로 실행해서 "매일 실행되는 트리거"를 등록해야 작동합니다.
+ */
+function cleanupOldLeads() {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const sheet = ss.getSheetByName(SHEET_NAME);
+  if (!sheet) return;
+
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return; // 헤더만 있고 데이터 없음
+
+  const dateColIndex = 5; // E열 = 접수일시
+  const now = new Date();
+  const cutoffMs = RETENTION_DAYS * 24 * 60 * 60 * 1000;
+
+  // 아래에서 위로 훑어야 행을 지워도 인덱스가 안 꼬입니다.
+  for (let row = lastRow; row >= 2; row--) {
+    const cellValue = sheet.getRange(row, dateColIndex).getValue();
+    if (!cellValue) continue; // 접수일시가 비어있으면 건너뜀 (수동 입력 데이터 등 보호)
+
+    const recordedDate = new Date(cellValue);
+    if (isNaN(recordedDate.getTime())) continue;
+
+    if (now.getTime() - recordedDate.getTime() > cutoffMs) {
+      sheet.deleteRow(row);
+    }
+  }
+}
+
+/**
+ * [최초 1회 실행용] 위 cleanupOldLeads()를 매일 자동으로 실행하는 트리거를 등록합니다.
+ * Apps Script 편집기에서 이 함수를 딱 한 번 "실행" 버튼으로 실행하면 됩니다.
+ * (실행 시 권한 승인 창이 뜨면 이전처럼 승인해주세요)
+ * 이미 등록된 동일한 트리거가 있으면 중복 등록되지 않도록 먼저 정리합니다.
+ */
+function installDailyCleanupTrigger() {
+  const triggers = ScriptApp.getProjectTriggers();
+  triggers.forEach(t => {
+    if (t.getHandlerFunction() === "cleanupOldLeads") {
+      ScriptApp.deleteTrigger(t);
+    }
+  });
+
+  ScriptApp.newTrigger("cleanupOldLeads")
+    .timeBased()
+    .everyDays(1)
+    .atHour(3) // 매일 새벽 3시경 실행
+    .create();
 }
